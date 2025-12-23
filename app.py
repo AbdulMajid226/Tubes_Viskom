@@ -8,20 +8,32 @@ from PIL import Image
 from ultralytics import YOLO
 from streamlit_webrtc import webrtc_streamer
 
-# --- CONFIG PAGE ---
-st.set_page_config(page_title="Drowsiness Detection", page_icon="😴", layout="centered")
+# --- KONFIGURASI HALAMAN ---
+st.set_page_config(
+    page_title="Drowsiness Detection",
+    page_icon="😴",
+    layout="centered"
+)
 
-# --- JUDUL & SIDEBAR ---
+# --- JUDUL APLIKASI ---
 st.title("😴 Driver Drowsiness Detection")
-st.caption("Tugas Besar Visi Komputer - Realtime & Video Playback")
+st.caption("Tugas Besar Visi Komputer - Universitas Diponegoro")
 
+# --- SIDEBAR (PANEL KONTROL) ---
 st.sidebar.header("Panel Kontrol")
 mode = st.sidebar.selectbox("Pilih Mode Input", ["Realtime Webcam", "Upload Gambar/Video"])
 confidence = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
 
+st.sidebar.divider()
+st.sidebar.info(
+    "Webcam Mode: Menggunakan WebRTC untuk deteksi real-time.\n\n"
+    "Upload Mode: Memproses file video dan menyimpannya untuk diputar ulang."
+)
+
 # --- LOAD MODEL ---
 @st.cache_resource
 def load_model():
+    # Pastikan file best.pt ada di folder yang sama
     return YOLO("best.pt")
 
 try:
@@ -29,28 +41,35 @@ try:
 except Exception as e:
     st.error(f"Error loading model: {e}")
 
-# --- LOGIKA WEBCAM (WEBRTC) ---
+# --- LOGIKA WEBCAM (Hanya Streaming, Tanpa Playback) ---
 def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
     image = frame.to_ndarray(format="bgr24")
     
-    # Inference
+    # 1. Inference YOLO
     results = model(image, conf=confidence, verbose=False)
     annotated_frame = results[0].plot()
     
-    # Alert Logic
+    # 2. Logika Peringatan (Alert)
     if len(results[0].boxes) > 0:
         cls_id = int(results[0].boxes.cls[0])
         label_name = model.names[cls_id]
-        if label_name == "drowsy":
-            cv2.putText(annotated_frame, "MENGANTUK!", (50, 100), 
+        
+        if label_name == "drowsy": # Pastikan nama label sesuai dataset Anda
+            # Tambahkan Teks Merah Besar
+            cv2.putText(annotated_frame, "BAHAYA: MENGANTUK!", (50, 100), 
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
-            cv2.rectangle(annotated_frame, (0,0), (image.shape[1], image.shape[0]), (0,0,255), 10)
+            # Tambahkan Kotak Merah di Sekeliling Layar
+            cv2.rectangle(annotated_frame, (0,0), (image.shape[1], image.shape[0]), (0,0,255), 20)
             
+    # Kembalikan frame ke browser (Real-time display)
     return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
-# --- MAIN APP LOGIC ---
+# --- TAMPILAN UTAMA ---
+
 if mode == "Realtime Webcam":
-    st.info("Mode Webcam: Klik 'START' di bawah. Izinkan browser mengakses kamera.")
+    st.subheader("📡 Real-time Detection")
+    st.write("Klik 'START' dan izinkan akses kamera browser.")
+    
     webrtc_streamer(
         key="drowsiness-detection",
         video_frame_callback=video_frame_callback,
@@ -59,48 +78,43 @@ if mode == "Realtime Webcam":
     )
 
 elif mode == "Upload Gambar/Video":
-    st.info("Mode Upload: Unggah file foto atau video untuk dianalisis.")
-    uploaded_file = st.file_uploader("Upload file...", type=['jpg', 'jpeg', 'png', 'mp4'])
+    st.subheader("📂 Upload File")
+    uploaded_file = st.file_uploader("Pilih file gambar atau video...", type=['jpg', 'jpeg', 'png', 'mp4'])
 
     if uploaded_file:
-        # --- PROSES GAMBAR ---
+        # --- JIKA GAMBAR ---
         if uploaded_file.type in ["image/jpeg", "image/png", "image/jpg"]:
             image = Image.open(uploaded_file)
-            st.subheader("Hasil Deteksi:")
             img_array = np.array(image)
+            
             results = model(img_array, conf=confidence)
             res_plotted = results[0].plot()
-            st.image(res_plotted, caption="Processed Image", use_container_width=True)
             
-            if len(results[0].boxes) > 0:
-                label = model.names[int(results[0].boxes.cls[0])]
-                st.write(f"**Terdeteksi:** {label}")
+            st.image(res_plotted, caption="Hasil Deteksi Gambar", use_container_width=True)
 
-        # --- PROSES VIDEO (DENGAN PLAYBACK) ---
+        # --- JIKA VIDEO (ADA PLAYBACK) ---
         elif uploaded_file.type == "video/mp4":
-            st.write("Sedang memproses video... Harap tunggu.")
+            st.warning("Sedang memproses video... Harap tunggu hingga 100%.")
             
-            # 1. Simpan file input sementara
+            # Simpan input sementara
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             
             cap = cv2.VideoCapture(tfile.name)
             
-            # Ambil properti video asli
+            # Setup Output Video
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            # 2. Siapkan Video Writer untuk Output
-            output_path = "output_hasil_deteksi.mp4"
-            # 'mp4v' adalah codec yang paling aman untuk Windows/OpenCV standar
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+            output_path = "hasil_deteksi.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
             
-            # Placeholder untuk Progress Bar & Frame Preview
+            # Progress Bar
             progress_bar = st.progress(0)
-            st_frame = st.empty()
+            status_text = st.empty()
             
             frame_count = 0
             while cap.isOpened():
@@ -108,38 +122,33 @@ elif mode == "Upload Gambar/Video":
                 if not ret:
                     break
                 
-                # Inference YOLO
+                # Proses Deteksi
                 results = model(frame, conf=confidence)
                 res_plotted = results[0].plot()
                 
-                # Tulis frame hasil ke file output
+                # Simpan ke file output
                 out.write(res_plotted)
                 
-                # Tampilkan Preview Live (Optional - biar user gak bosen nunggu)
-                st_frame.image(cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB), caption=f"Processing Frame {frame_count}/{total_frames}", use_container_width=True)
-                
-                # Update Progress Bar
+                # Update Progress
                 frame_count += 1
                 if total_frames > 0:
-                    progress_bar.progress(min(frame_count / total_frames, 1.0))
+                    progress_value = min(frame_count / total_frames, 1.0)
+                    progress_bar.progress(progress_value)
+                    status_text.text(f"Processing Frame: {frame_count}/{total_frames}")
 
             cap.release()
             out.release()
             
-            # Bersihkan elemen UI preview
-            st_frame.empty()
             progress_bar.empty()
+            status_text.empty()
             
-            # 3. Tampilkan Hasil Akhir (Playback)
-            st.success("Selesai! Berikut hasil videonya:")
-            st.divider()
+            # Tampilkan Hasil Playback
+            st.success("Selesai! Berikut hasil deteksinya:")
             
-            # Konversi file agar kompatibel dengan Browser (Opsional trick)
-            # Karena Streamlit kadang rewel dengan codec mp4v, kita baca ulang sebagai bytes
+            # Trik agar video terbaca browser: Baca sebagai binary
             try:
-                video_file = open(output_path, 'rb')
-                video_bytes = video_file.read()
-                st.video(video_bytes)
+                with open(output_path, 'rb') as f:
+                    video_bytes = f.read()
+                    st.video(video_bytes)
             except Exception as e:
-                st.error("Video selesai diproses tapi gagal dimuat di player browser.")
-                st.write(f"File tersimpan di folder project dengan nama: {output_path}")
+                st.error("Gagal memuat player video. Cek file 'hasil_deteksi.mp4' di folder project Anda.")
