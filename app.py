@@ -1,97 +1,67 @@
 import streamlit as st
 import cv2
+import av
+import numpy as np
 from ultralytics import YOLO
-import tempfile
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(
-    page_title="Sistem Deteksi Kelelahan",
-    page_icon="😴",
-    layout="centered"
-)
-
-# --- JUDUL & SIDEBAR ---
+# --- CONFIG PAGE ---
+st.set_page_config(page_title="Drowsiness Detection", page_icon="😴")
 st.title("😴 Driver Drowsiness Detection")
-st.caption("Tugas Besar Visi Komputer - Deteksi Kelelahan Realtime")
-
-st.sidebar.header("Konfigurasi")
-confidence = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
-use_webcam = st.sidebar.toggle("Gunakan Webcam", value=False)
+st.caption("Real-time Inference via WebRTC (Deployment Ready)")
 
 # --- LOAD MODEL ---
-# Pastikan file best.pt ada di satu folder dengan file ini
+# Cache model agar tidak reload setiap ada frame baru
+@st.cache_resource
+def load_model():
+    return YOLO("best.pt")
+
 try:
-    model = YOLO("best.pt")
+    model = load_model()
 except Exception as e:
-    st.error(f"Error loading model: {e}. Pastikan file 'best.pt' ada di folder yang sama.")
-    st.stop()
+    st.error(f"Error loading model: {e}")
 
-# --- UTILS: TAMPILAN STATUS ---
-def display_status(label):
-    if label == "drowsy": # Sesuaikan dengan nama label di Roboflow Anda
-        st.error("⚠️ PERINGATAN: TERDETEKSI MENGANTUK!")
-    elif label == "awake":
-        st.success("✅ Status: Aman (Terjaga)")
-    else:
-        st.info(f"Terdeteksi: {label}")
+# --- PARAMETER ---
+confidence = st.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
 
-# --- MAIN LOGIC (WEBCAM) ---
-if use_webcam:
-    cap = cv2.VideoCapture(0) # 0 biasanya ID webcam default laptop
+# --- CALLBACK PROCESSOR ---
+# Fungsi ini akan dipanggil untuk setiap frame video yang masuk
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    image = frame.to_ndarray(format="bgr24")
     
-    if not cap.isOpened():
-        st.error("Tidak bisa membuka webcam.")
+    # 1. Inference YOLO
+    results = model(image, conf=confidence, verbose=False)
     
-    # Placeholder untuk gambar video
-    frame_placeholder = st.empty()
-    stop_button = st.button("Stop Deteksi")
+    # 2. Gambar Kotak Deteksi
+    annotated_frame = results[0].plot()
     
-    while cap.isOpened() and not stop_button:
-        ret, frame = cap.read()
-        if not ret:
-            st.write("Gagal membaca frame webcam.")
-            break
+    # 3. Logika Alert (Digambar langsung di Video agar realtime)
+    # Kita tidak bisa pakai st.error() di dalam callback webrtc
+    if len(results[0].boxes) > 0:
+        cls_id = int(results[0].boxes.cls[0])
+        label_name = model.names[cls_id]
         
-        # 1. Lakukan Deteksi dengan YOLO
-        results = model(frame, conf=confidence, verbose=False)
-        
-        # 2. Visualisasi (Gambar Kotak di Frame)
-        annotated_frame = results[0].plot()
-        
-        # 3. Logika Peringatan (Ambil label pertama yang terdeteksi)
-        if len(results[0].boxes) > 0:
-            # Ambil ID kelas dari deteksi pertama
-            cls_id = int(results[0].boxes.cls[0])
-            label_name = model.names[cls_id]
-            
-            # Tampilkan alert di bawah video (hanya 1 baris agar tidak spam)
-            with st.sidebar:
-                st.write(f"Terdeteksi: **{label_name}**")
-                if label_name == "drowsy":
-                    st.markdown("# 🚨 BANGUN!")
-        
-        # 4. Tampilkan ke Streamlit (Convert BGR ke RGB)
-        frame_placeholder.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), channels="RGB")
-        
-    cap.release()
-else:
-    st.info("Aktifkan toggle 'Gunakan Webcam' di sebelah kiri untuk memulai demo.")
+        if label_name == "drowsy": # Sesuaikan dengan label Anda
+            # Tambahkan Teks Merah Besar di Layar
+            cv2.putText(annotated_frame, "BAHAYA: MENGANTUK!", (50, 100), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+            # Tambahkan Border Merah
+            cv2.rectangle(annotated_frame, (0,0), (image.shape[1], image.shape[0]), (0,0,255), 10)
     
-    # --- BONUS: UPLOAD GAMBAR/VIDEO (Syarat Tugas) ---
-    st.divider()
-    st.subheader("Uji Coba File Gambar/Video")
-    uploaded_file = st.file_uploader("Upload gambar/video...", type=['jpg', 'png', 'mp4'])
-    
-    if uploaded_file:
-        # Simpan file sementara
-        tfile = tempfile.NamedTemporaryFile(delete=False) 
-        tfile.write(uploaded_file.read())
-        
-        if uploaded_file.name.endswith('.mp4'):
-            st.video(tfile.name)
-            st.write("Untuk video, silakan gunakan mode Webcam untuk realtime inference.")
-        else:
-            image = cv2.imread(tfile.name)
-            results = model(image, conf=confidence)
-            res_plotted = results[0].plot()
-            st.image(cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB), caption="Hasil Deteksi")
+    # Kembalikan frame yang sudah diedit ke browser
+    return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
+
+# --- MAIN INTERFACE ---
+st.info("Klik 'START' dan izinkan akses kamera browser Anda.")
+
+webrtc_streamer(
+    key="drowsiness-detection",
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": True, "audio": False},
+    rtc_configuration={  # STUN Server (Agar jalan di HP/Jaringan berbeda)
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    }
+)
+
+st.markdown("---")
+st.write("Dibuat untuk Tugas Besar Visi Komputer.")
