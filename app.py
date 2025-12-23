@@ -3,6 +3,7 @@ import cv2
 import av
 import numpy as np
 import tempfile
+import os
 from PIL import Image
 from ultralytics import YOLO
 from streamlit_webrtc import webrtc_streamer
@@ -12,7 +13,7 @@ st.set_page_config(page_title="Drowsiness Detection", page_icon="😴", layout="
 
 # --- JUDUL & SIDEBAR ---
 st.title("😴 Driver Drowsiness Detection")
-st.caption("Tugas Besar Visi Komputer - Realtime & Upload Support")
+st.caption("Tugas Besar Visi Komputer - Realtime & Video Playback")
 
 st.sidebar.header("Panel Kontrol")
 mode = st.sidebar.selectbox("Pilih Mode Input", ["Realtime Webcam", "Upload Gambar/Video"])
@@ -21,7 +22,6 @@ confidence = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
 # --- LOAD MODEL ---
 @st.cache_resource
 def load_model():
-    # Pastikan file best.pt ada di folder yang sama
     return YOLO("best.pt")
 
 try:
@@ -67,41 +67,79 @@ elif mode == "Upload Gambar/Video":
         if uploaded_file.type in ["image/jpeg", "image/png", "image/jpg"]:
             image = Image.open(uploaded_file)
             st.subheader("Hasil Deteksi:")
-            
-            # Konversi ke array agar bisa diproses YOLO
             img_array = np.array(image)
             results = model(img_array, conf=confidence)
             res_plotted = results[0].plot()
-            
-            # Tampilkan
             st.image(res_plotted, caption="Processed Image", use_container_width=True)
             
-            # Tampilkan Label Text
             if len(results[0].boxes) > 0:
                 label = model.names[int(results[0].boxes.cls[0])]
                 st.write(f"**Terdeteksi:** {label}")
 
-        # --- PROSES VIDEO ---
+        # --- PROSES VIDEO (DENGAN PLAYBACK) ---
         elif uploaded_file.type == "video/mp4":
-            st.warning("Memproses video... (Ini mungkin agak lambat di Cloud)")
+            st.write("Sedang memproses video... Harap tunggu.")
             
-            # Simpan file sementara (karena OpenCV butuh path file, bukan bytes)
+            # 1. Simpan file input sementara
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             
             cap = cv2.VideoCapture(tfile.name)
-            st_frame = st.empty() # Placeholder untuk update frame
             
+            # Ambil properti video asli
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # 2. Siapkan Video Writer untuk Output
+            output_path = "output_hasil_deteksi.mp4"
+            # 'mp4v' adalah codec yang paling aman untuk Windows/OpenCV standar
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            
+            # Placeholder untuk Progress Bar & Frame Preview
+            progress_bar = st.progress(0)
+            st_frame = st.empty()
+            
+            frame_count = 0
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
-                # Inference
+                # Inference YOLO
                 results = model(frame, conf=confidence)
                 res_plotted = results[0].plot()
                 
-                # Tampilkan frame-by-frame (Convert BGR to RGB)
-                st_frame.image(cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB), caption="Video Processing", use_container_width=True)
-            
+                # Tulis frame hasil ke file output
+                out.write(res_plotted)
+                
+                # Tampilkan Preview Live (Optional - biar user gak bosen nunggu)
+                st_frame.image(cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB), caption=f"Processing Frame {frame_count}/{total_frames}", use_container_width=True)
+                
+                # Update Progress Bar
+                frame_count += 1
+                if total_frames > 0:
+                    progress_bar.progress(min(frame_count / total_frames, 1.0))
+
             cap.release()
+            out.release()
+            
+            # Bersihkan elemen UI preview
+            st_frame.empty()
+            progress_bar.empty()
+            
+            # 3. Tampilkan Hasil Akhir (Playback)
+            st.success("Selesai! Berikut hasil videonya:")
+            st.divider()
+            
+            # Konversi file agar kompatibel dengan Browser (Opsional trick)
+            # Karena Streamlit kadang rewel dengan codec mp4v, kita baca ulang sebagai bytes
+            try:
+                video_file = open(output_path, 'rb')
+                video_bytes = video_file.read()
+                st.video(video_bytes)
+            except Exception as e:
+                st.error("Video selesai diproses tapi gagal dimuat di player browser.")
+                st.write(f"File tersimpan di folder project dengan nama: {output_path}")
